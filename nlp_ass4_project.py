@@ -11,6 +11,9 @@ Original file is located at
 #### Setup
 """
 
+# ! pip install transformers
+# ! pip install sentence_transformers
+
 import pandas as pd
 import numpy as np
 import torch
@@ -25,11 +28,74 @@ from sentence_transformers import SentenceTransformer, util
 import pickle
 import os
 
+# from google.colab import drive
+# drive.mount('/content/drive')
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+"""### Data *engneering*"""
+
+# folder_path = "/content/drive/MyDrive/IIITD/Courses/nlp/Assignment 4/"
+# path_train_file = folder_path+"train_file.json"
+# df_train = pd.read_json(path_train_file)
+# df_train.head()
+
+# for i in df_train['utterances']:
+#     print(i)
+#     break ;
+
+# model = SentenceTransformer('all-mpnet-base-v2')
+
+# df_train['utterances_embeddings'] = np.nan
+
+# df_train.head()
+
+# if os.path.exists('sentence_embeddings.pkl'):
+#     embeddings = pickle.load(open('sentence_embeddings.pkl', 'rb'))
+# else :
+#     embeddings = [model.encode(utterance) for utterance in tqdm(df_train['utterances'])]
+#     pickle.dump(embeddings, open('sentence_embeddings.pkl', 'wb'))
+
+# df_train['utterances_embeddings'] = embeddings
+
+# df_train.head()
+
+# df_train.info()
+
+# def generate_cnn_embeddings(row):
+#     speakers = row['speakers']
+
+#     embeddings_list = row['utterances_embeddings']
+
+#     speaker_index = {}
+#     index = 0
+#     for speaker in speakers:
+#         if speaker not in speaker_index:
+#             speaker_index[speaker] = index
+#             index += 1
+
+#     S = len(speaker_index)
+#     N = len(speakers)
+#     embeddings_tensor = np.zeros((max(10 , S), 768, N))
+#     for i, (speaker, embedding) in enumerate(zip(speakers, embeddings_list)):
+#         idx = speaker_index[speaker]
+#         embeddings_tensor[idx, :, i] = embedding
+#     return embeddings_tensor
+
+
+# df_train['CNN_embeddings'] = df_train.apply(generate_cnn_embeddings, axis=1)
+
+# pickle.dump(df_train, open('df_train_with_CNN_embeddings.pkl', 'wb'))
+
+# df_train = pickle.load(open('df_train_with_CNN_embeddings.pkl', 'rb'))
+
+# df_train.head()
 
 """### **Models**"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class ERC_CNN(nn.Module):
     def __init__(self, in_channels, mid_channels, out_channels, input_size, hidden_size, num_layers, mlp_hidden_size, output_size):
@@ -39,32 +105,76 @@ class ERC_CNN(nn.Module):
         Input shape: (batch_size, in_channels, width, length)
         Output shape: (batch_size, seq_length, output_size)
         """
+        # self.input_size = input_size
+        self.hidden_size = hidden_size
+        # self.num_layers = num_layers
         # CNN layers
-        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=(1, 1))
-        self.conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=(1, 1))
+        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=(3, 3), padding=1)
+        self.conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=(3, 3), padding=1)
 
         # BiLSTM layer
+        # self.h0, self.c0 = torch.zeros(self.num_layers * 2, self.input_size, self.hidden_size), torch.zeros(self.num_layers * 2, self.input_size, self.hidden_size)
         self.bilstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=True)
 
         # MLP layers
         self.fc1 = nn.Linear(hidden_size * 2, mlp_hidden_size)
         self.fc2 = nn.Linear(mlp_hidden_size, output_size)
+        self.softmax = nn.Softmax(dim = 1)
+
 
     def forward(self, x):
         # CNN
-        x = F.relu(self.conv1(x))
+        x = self.conv1(x)
+        x = F.relu(x)
         x = self.conv2(x)
 
         # BiLSTM
         x = x.squeeze(1)  # Remove the singleton dimension
-        x, _ = self.bilstm(x)
+        x, _ = self.bilstm(x)  # out shape: (batch_size, seq_length, hidden_size * 2)
 
         # MLP
-        x = F.relu(self.fc1(x))
+        x = self.fc1(x)
+        x = F.relu(x)
         x = self.fc2(x)
+        # x = self.softmax(x) # softmax is not letting it train fast atleast
 
         return x
 
+# Define parameters
+batch_size = 1
+speakers = 10  # max_speakers
+num_utterances = 24  # dialogue_length
+embedding_size = 768
+
+cnn_mid_channels = 3
+cnn_out_channels = 1
+
+hidden_lstm = 64
+layers_lstm = 1
+
+inputs_mlp = hidden_lstm * 2
+hidden_mlp = 64
+output_mlp = number_of_emotions = 7
+
+
+# Create individual components
+# Initialize the ERC_CNN class
+model = ERC_CNN(in_channels=speakers,
+                mid_channels=cnn_mid_channels,
+                out_channels=cnn_out_channels,
+                input_size=embedding_size,
+                hidden_size=hidden_lstm,
+                num_layers=layers_lstm,
+                mlp_hidden_size=hidden_mlp,
+                output_size=output_mlp)
+
+input_tensor = torch.randn(batch_size, speakers, num_utterances, embedding_size)
+
+
+# Forward pass through the model
+output = model(input_tensor)  # Add batch dimension
+
+print("Final Output shape:", output.shape)
 
 """### DataLoader"""
 
@@ -142,7 +252,7 @@ model = ERC_CNN(in_channels=speakers,
                 hidden_size=hidden_lstm,
                 num_layers=layers_lstm,
                 mlp_hidden_size=hidden_mlp,
-                output_size=output_mlp)
+                output_size=output_mlp).to(DEVICE)
 
 # input_tensor = torch.randn(batch_size, speakers, num_utterances, embedding_size)
 
@@ -187,19 +297,10 @@ for epoch in range(num_epochs):
 
         optimizer.zero_grad()  # Zero the parameter gradients
 
-        # Forward pass
         outputs = model(inputs.float())
-
-        # Compute the loss
         loss = criterion(outputs, labels)
-
-        # Backward pass
         loss.backward()
-
-        # Update model parameters
         optimizer.step()
-
-        # Print statistics
         running_loss += loss.item() * inputs.size(0)
 
     # Print average loss for the epoch
@@ -214,13 +315,345 @@ for epoch in range(num_epochs):
 
         # optimizer.zero_grad()  # Zero the parameter gradients
 
-        # Forward pass
         outputs = model(inputs.float())
-
-        # Compute the loss
         loss = criterion(outputs, labels)
         val_running_loss += loss.item() * inputs.size(0)
 
     # Print average loss for the epoch
     val_epoch_loss = val_running_loss / len(val_dataloader.dataset)
     print(f"Epoch [{epoch+1}/{num_epochs}], Val Loss: {val_epoch_loss:.4f}")
+
+"""### Attention"""
+
+import torch
+import torch.nn as nn
+
+#! add speaker embedding maybe self attention on sparse
+
+class SelfAttention(nn.Module):
+    def __init__(self, embedding_size, num_heads):
+        super(SelfAttention, self).__init__()
+        self.num_heads = num_heads
+        self.multihead_attn = nn.MultiheadAttention(embedding_size, num_heads)
+
+    def forward(self, utterance_embeddings):
+        # Reshape utterance embeddings to (seq_len, batch_size, embedding_dim)
+        # utterance_embeddings = utterance_embeddings.unsqueeze(0)  # Add a dimension for seq_len
+        output, _ = self.multihead_attn(utterance_embeddings, utterance_embeddings, utterance_embeddings)
+        return output
+
+# Example usage
+# num_utterances = 24  # Number of utterances
+# # Generate random utterance embeddings
+# utterance_embeddings = torch.randn(1, num_utterances, embedding_size)
+
+s = 10  # max_speakers
+n = 24  # dialogue_length
+num_heads = 8  # Number of attention heads
+embedding_size = 768  # Size of each embedding
+input = torch.randn(s, n, embedding_size)
+
+
+# Define self-attention layer
+attention_layer = SelfAttention(embedding_size=embedding_size, num_heads=num_heads)
+
+# Apply self-attention
+context_embeddings = attention_layer(input)
+
+# Check the shape of the output tensor
+print(context_embeddings.shape)  # Output shape: (n, embedding_dim)
+
+"""### Bi-LSTM"""
+
+import torch
+import torch.nn as nn
+
+class BiLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers):
+        super(BiLSTM, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # Bidirectional LSTM layer
+        self.bilstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=True)
+
+    def forward(self, x):
+        # Initialize hidden state and cell state
+        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)  # 2 for bidirectional
+        c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
+
+        # Forward propagate LSTM : (h_n, c_n): A tuple containing the final hidden state $h_n$ and the final cell state $c_n$ of the LSTM,
+        out, _ = self.bilstm(x, (h0, c0))  # out shape: (batch_size, seq_length, hidden_size * 2)
+
+        # Concatenate the outputs from both directions
+        out = torch.cat((out[:, :, :self.hidden_size], out[:, :, self.hidden_size:]), dim=2)
+
+        return out
+
+# Define input size, hidden size, and number of layers
+input_size = 768
+hidden_size = 64
+num_layers = 1
+
+n = 24
+
+# Create BiLSTM instance
+bilstm = BiLSTM(input_size, hidden_size, num_layers)
+
+# Generate random input tensor
+input_tensor = torch.randn(1, n, 768)  # Batch size 24, input size 768
+input_tensor = output
+
+# Forward pass through BiLSTM
+output = bilstm(input_tensor)  # Add batch dimension
+
+print("Output shape:", output.shape)  # Output shape should be [1, 24, 128] (24 vectors each of size 128)
+
+"""### MLP + Softmax"""
+
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+
+# class EmotionMLP(nn.Module):
+#     def __init__(self, input_size, hidden_size, output_size):
+#         super(EmotionMLP, self).__init__()
+#         self.relu = nn.ReLU()
+#         self.fc_1 = nn.Linear(input_size, hidden_size)
+#         self.fc_2 = nn.Linear(hidden_size, output_size)
+
+#     def forward(self, x):
+#         x = self.fc_1(x)
+#         x = self.relu(x)
+#         x = self.fc_2(x)
+#         return x
+
+
+# # Define input size, hidden size, and output size for the MLP
+# input_size = 128
+# hidden_size = 64
+# output_size = 6
+
+# n = 24
+
+# # Create a shared MLP instance
+# shared_mlp = EmotionMLP(input_size, hidden_size, output_size)
+
+# # Generate random input tensor
+# input_tensor = torch.randn(1, n, 128)  # Number of utterances: n = 24, Utterance embedding size: 128
+# input_tensor = output
+
+# # Apply the shared MLP sequentially 24 times
+# outputs = []
+# for i in range(n):
+#     output = shared_mlp(input_tensor[:, i, :])  # Feed each 128-dimensional vector
+#     output = F.softmax(output, dim=1)  # Apply softmax along dimension 1
+#     outputs.append(output.unsqueeze(1))  # Add a singleton dimension for concatenation later
+
+# # Concatenate the outputs along the second dimension to get 24 6-dimensional outputs
+# final_output = torch.cat(outputs, dim=1).squeeze(0)
+
+# print("Final output shape:", final_output)  # Output shape should be [24, 6]
+
+# import torch
+# import torch.nn as nn
+
+# s = 10  # max_speakers
+# n = 24  # dialogue_length
+# input = torch.randn(s, n, 768)
+
+# # Define the parameters for the convolution operation
+# mid_channels = 3
+# out_channels = 1  # Number of output channels
+# kernel_size = (1, 1, 1)  # Kernel size (depth, height, width)
+# stride = 1
+
+# # Define the convolutional layer
+# conv3d_1 = nn.Conv3d(in_channels=s, out_channels=mid_channels, kernel_size=kernel_size)
+# conv3d_2 = nn.Conv3d(in_channels=mid_channels, out_channels=out_channels, kernel_size=kernel_size)
+
+
+# # Reshape input to (batch_size, in_channels, depth, height, width)
+# input_ = input.unsqueeze(0).unsqueeze(2)  # Adding batch and depth dimensions
+
+# # Perform convolution
+# mid = conv3d_1(input_)
+# output = conv3d_2(mid)
+
+# print(input.shape)
+# print(input_.shape)
+# print(mid.shape)
+# print(output.shape)
+
+# # Ensure the output has the desired shape
+# output = output.squeeze(0).squeeze(1)  # Remove batch and depth dimensions
+# print("Output shape:", output.shape)  # Output shape should be 1*n*768
+
+"""### Attention"""
+
+import torch
+import torch.nn as nn
+
+
+class SelfAttention(nn.Module):
+    def __init__(self, input_size, num_heads):
+        super(SelfAttention, self).__init__()
+        self.num_heads = num_heads
+        self.multihead_attn = nn.MultiheadAttention(input_size, num_heads)
+
+    def forward(self, sentence_embeddings):
+        output, _ = self.multihead_attn(sentence_embeddings, sentence_embeddings, sentence_embeddings)
+        return output
+
+sentence_embeddings = torch.randn(20, 10, 768)  # Shape: (seq_len, batch_size, embedding_dim)
+
+# Define self-attention layer
+num_heads = 1  # Number of attention heads
+attention_layer = SelfAttention(input_size=768, num_heads=num_heads)
+
+# Apply self-attention
+context_embeddings = attention_layer(sentence_embeddings)
+
+# Check the shape of the output tensor
+print(context_embeddings.shape)
+
+import torch
+import torch.nn as nn
+
+class SelfAttention(nn.Module):
+    def __init__(self, embedding_size, num_heads):
+        super(SelfAttention, self).__init__()
+        self.num_heads = num_heads
+        self.multihead_attn = nn.MultiheadAttention(embedding_size, num_heads)
+
+    def forward(self, utterance_embeddings):
+        # Reshape utterance embeddings to (seq_len, batch_size, embedding_dim)
+        utterance_embeddings = utterance_embeddings.unsqueeze(0)  # Add a dimension for seq_len
+        output, _ = self.multihead_attn(utterance_embeddings, utterance_embeddings, utterance_embeddings)
+        return output.squeeze(0)  # Remove the added dimension
+
+# Example usage
+num_utterances = 10  # Number of utterances
+embedding_size = 768  # Size of each embedding
+num_heads = 8  # Number of attention heads
+
+# Generate random utterance embeddings
+utterance_embeddings = torch.randn(num_utterances, embedding_size)
+
+# Define self-attention layer
+attention_layer = SelfAttention(embedding_size=embedding_size, num_heads=num_heads)
+
+# Apply self-attention
+context_embeddings = attention_layer(utterance_embeddings)
+
+# Check the shape of the output tensor
+print(context_embeddings.shape)  # Output shape: (n, embedding_dim)
+
+class CNN(nn.Module):
+    def __init__(self, in_channels, mid_channels, out_channels):
+        super(CNN, self).__init__()
+        """
+        CNN Module
+        Input shape: (batch_size, in_channels, width, length)
+        Output shape: (batch_size, out_channels, width, length)
+        """
+        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=(1, 1))
+        self.conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=(1, 1))
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = f.relu(x)
+        x = self.conv2(x)
+        return x
+
+class BiLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers):
+        super(BiLSTM, self).__init__()
+        """
+        BiLSTM Module
+        Input shape: (batch_size, seq_length, input_size)
+        Output shape: (batch_size, seq_length, hidden_size * 2)
+        """
+        self.bilstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers, batch_first=True, bidirectional=True)
+
+    def forward(self, x):
+        out, _ = self.bilstm(x)
+        return out
+
+class MLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+        """
+        MLP Module
+        Input shape: (batch_size, seq_length, input_size)
+        Output shape: (batch_size, seq_length, output_size)
+        """
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+class ERC_CNN(nn.Module):
+    # torch.Size([16, 10, 24, 768])
+    # torch.Size([16, 1, 24, 768])
+    # torch.Size([16, 24, 768])
+    # torch.Size([16, 24, 128])
+    # torch.Size([16, 24, 128])
+    # torch.Size([16, 24, 6])
+
+    # Final Output shape: torch.Size([16, 24, 6])
+
+    def __init__(self, cnn, bilstm, mlp):
+        super(ERC_CNN, self).__init__()
+        self.cnn = cnn
+        self.bilstm = bilstm
+        self.mlp = mlp
+
+    def forward(self, x):
+        # CNN
+        x = self.cnn(x)  # Output shape: (batch_size, out_channels, width, length)
+
+        # BiLSTM
+        x = x.squeeze(1)  # Remove the singleton dimension
+        x = self.bilstm(x)  # Output shape: (batch_size, seq_length, hidden_size * 2)
+
+        # MLP
+        x = self.mlp(x)  # Output shape: (batch_size, seq_length, output_size)
+
+        return x
+
+# Define parameters
+batch_size = 1
+speakers = 10  # max_speakers
+num_utterances = 24  # dialogue_length
+embedding_size = 768
+
+cnn_mid_channels = 3
+cnn_out_channels = 1
+
+hidden_lstm = 64
+layers_lstm = 1
+
+inputs_mlp = hidden_lstm * 2
+hidden_mlp = 64
+output_mlp = number_of_emotions = 7
+
+
+# Create individual components
+cnn = CNN(speakers, cnn_mid_channels, cnn_out_channels)
+bilstm = BiLSTM(embedding_size, hidden_lstm, layers_lstm)
+mlp = MLP(inputs_mlp, hidden_mlp, output_mlp)
+
+# # Create the combined model
+# model = ERC_CNN(cnn, bilstm, mlp)
+# input_tensor = torch.randn(batch_size, speakers, num_utterances, embedding_size)
+
+
+# # Forward pass through the model
+# output = model(input_tensor)  # Add batch dimension
+
+# print("Final Output shape:", output.shape)
